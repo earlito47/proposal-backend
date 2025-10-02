@@ -24,7 +24,7 @@ Define all colors used in this template
   be found in the CSS code below in a position property and is defined there by 
   the running() function.
   */
-  size:A4;
+  size:US-Letter;
   
   @top-left{
   	content:element(header);
@@ -99,7 +99,7 @@ header{
 
 /*
 The cover page DIV element gets a width of 50% of the page and a fixed height of
-237mm with an margin and padding of 1.5cm. The text color we will set to white and
+207mm with an margin and padding of 1.5cm. The text color we will set to white and
 all text on the cover page should be displayed in uppercase no matter how its written
 in the HTML code. 
 
@@ -110,7 +110,7 @@ text.
 .coverPage{
   position:relative;
   width:50%;
-  height:237mm;
+  height:207mm;
   margin:1.5cm;
   padding:1.5cm;
   color:white;
@@ -544,8 +544,9 @@ Below the image there is a text which we show in 3 columns with a gap between th
 10mm, additionally we keep 10mm margin top to have some space between image and text.
 */
 div.conclusion{
-  margin-top:10mm;
-  column-gap:10mm;
+  font-size:9pt;
+  margin-top:5mm;
+  column-gap:5mm;
   column-count:3;
 }
 
@@ -632,18 +633,11 @@ weight.
 
 /*
 The table on the budget page should always be 100% wide and the borders should be 
-collapsed. To give some space between the tables we add a margin top of 1.5cm.
+collapsed. To give some space between the tables we add a margin top of 1cm.
 */
 .chapter.budget table{
   width:100%;
   border-collapse:collapse;
-  margin-top:1.5cm;
-}
-
-/*
-The first table should have a little less margin between table and highlighted paragraph.
-*/
-.chapter.budget table:first-of-type{
   margin-top:1cm;
 }
 

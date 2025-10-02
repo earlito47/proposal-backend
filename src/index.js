@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { GovHubHTMLExtractor } = require('./html-extractor');
+const { DocRaptorMapper } = require('./docraptor-mapper');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -9,32 +11,41 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Backend is running' });
-});
-
-app.get('/api/v1/templates', (req, res) => {
-  res.json({
-    templates: [
-      { 
-        template_id: 'modern-corporate', 
-        name: 'Modern Corporate',
-        category: 'corporate'
-      },
-      { 
-        template_id: 'government-formal', 
-        name: 'Government Formal',
-        category: 'government'
-      }
-    ]
-  });
+  res.json({ status: 'ok' });
 });
 
 app.post('/api/v1/apply-template', async (req, res) => {
   try {
-    const { content } = req.body;
+    const { proposal_id, template_id } = req.body;
     
-    const html = '<html><head><style>body { font-family: Arial; margin: 2in; } h1 { color: #2563eb; font-size: 28pt; } p { font-size: 12pt; }</style></head><body><h1>' + (content.metadata.title || 'Proposal') + '</h1><p>Client: ' + (content.metadata.client_name || 'N/A') + '</p></body></html>';
-
+    console.log('Fetching HTML from GovHub for proposal:', proposal_id);
+    
+    // Get HTML from GovHub
+    const govhubResponse = await axios.post(
+      'https://iqekrwearenblsmhvdjn.supabase.co/functions/v1/generate-proposal-html',
+      { proposalId: proposal_id },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlxZWtyd2VhcmVuYmxzbWh2ZGpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTczNTA0NDUsImV4cCI6MjA3MjkyNjQ0NX0.khodqjjwJNovP4cd2fRK3Mdi6VG-HNp0JzzDzWSY_2Q'
+        }
+      }
+    );
+    
+    const govhubHTML = govhubResponse.data.html;
+    console.log('Received HTML from GovHub');
+    
+    // Extract content
+    const extractor = new GovHubHTMLExtractor(govhubHTML);
+    const extracted = extractor.extract();
+    console.log('Extracted data:', JSON.stringify(extracted, null, 2));
+    
+    // Map to DocRaptor template
+    const mapper = new DocRaptorMapper();
+    const styledHTML = mapper.map(extracted);
+    console.log('Mapped to DocRaptor template');
+    
+    // Generate PDF via DocRaptor
     const pdfResponse = await axios({
       url: 'https://api.docraptor.com/docs',
       method: 'post',
@@ -45,29 +56,25 @@ app.post('/api/v1/apply-template', async (req, res) => {
         doc: {
           test: true,
           document_type: 'pdf',
-          document_content: html,
-          name: 'proposal.pdf'
+          document_content: styledHTML,
+          name: `${extracted.title}.pdf`
         }
       }
     });
     
+    console.log('PDF generated successfully');
+    
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename=proposal.pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${extracted.title}.pdf"`);
     res.send(Buffer.from(pdfResponse.data));
-
+    
   } catch (error) {
-    console.error('DocRaptor error:', error);
-    
-    if (error.response && error.response.data) {
-      const decoder = new TextDecoder('utf-8');
-      const errorMessage = decoder.decode(error.response.data);
-      return res.status(500).json({ error: errorMessage });
+    console.error('Error:', error.message);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
     }
-    
-    res.status(500).json({ error: 'PDF generation failed' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log('Server running on port ' + PORT);
-});
+app.listen(PORT, () => console.log('Server running on port ' + PORT));

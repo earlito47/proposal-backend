@@ -28,8 +28,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",  # Local development
-        "https://*.lovable.app",   # Lovable production
-        "https://*.lovable.dev",   # Lovable staging
+        "https://8365aeb7-4757-4e22-b99e-4605f191ab8b.lovableproject.com",  # Your Lovable project
     ],
     allow_credentials=True,
     allow_methods=["*"],

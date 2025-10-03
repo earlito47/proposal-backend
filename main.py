@@ -173,8 +173,12 @@ async def root():
         "version": "1.0.0"
     }
 
+
 @app.get("/api/v1/templates", response_model=List[Template])
 async def get_templates():
+    """
+    List all available proposal templates
+    """
     templates = [
         Template(
             id="proposal",
@@ -184,6 +188,7 @@ async def get_templates():
             use_case="General business proposals and federal bids"
         ),
     ]
+    logger.info(f"Returning {len(templates)} templates")
     return templates
         
     except Exception as e:

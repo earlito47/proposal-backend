@@ -174,22 +174,40 @@ async def root():
     }
 
 
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    return {
+        "status": "healthy",
+        "service": "GovHub Template API",
+        "timestamp": os.popen('date').read().strip()
+    }
+
+
 @app.get("/api/v1/templates", response_model=List[Template])
 async def get_templates():
     """
     List all available proposal templates
     """
-    templates = [
-        Template(
-            id="proposal",
-            name="Professional Proposal",
-            description="Clean, modern template with blue accents and professional layout",
-            page_size="US-Letter",
-            use_case="General business proposals and federal bids"
-        ),
-    ]
-    logger.info(f"Returning {len(templates)} templates")
-    return templates
+    try:
+        templates = [
+            Template(
+                id="proposal",
+                name="Professional Proposal",
+                description="Clean, modern template with blue accents and professional layout",
+                page_size="US-Letter",
+                use_case="General business proposals and federal bids"
+            ),
+            Template(
+                id="modern-tech",
+                name="Modern Tech",
+                description="Contemporary design optimized for technology proposals",
+                page_size="US-Letter",
+                use_case="Technology and innovation projects"
+            ),
+        ]
+        logger.info(f"Returning {len(templates)} templates")
+        return templates
         
     except Exception as e:
         logger.error(f"Error fetching templates: {str(e)}")

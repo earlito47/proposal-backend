@@ -23,12 +23,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS Configuration
+# CORS Configuration - Updated with your Lovable URLs
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",  # Local development
-        "https://8365aeb7-4757-4e22-b99e-4605f191ab8b.lovableproject.com",  # Your Lovable project
+        "http://localhost:5174",  # Alternative local port
+        "https://8365aeb7-4757-4e22-b99e-4605f191ab8b.lovableproject.com",  # Main Lovable project
+        "https://id-preview--8365aeb7-4757-4e22-b99e-4605f191ab8b.lovable.app",  # Your preview URL
+        "https://*--8365aeb7-4757-4e22-b99e-4605f191ab8b.lovable.app",  # All preview branches
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -229,14 +229,31 @@ async def generate_pdf(request: GeneratePDFRequest):
     try:
         logger.info(f"Generating PDF with template: {request.templateId}")
         
-        # Load template CSS
-        css = load_template_css(
-            request.templateId,
-            request.options.pageSize if request.options else "US-Letter"
-        )
+        # Load template CSS with debug logging
+        try:
+            css = load_template_css(
+                request.templateId,
+                request.options.pageSize if request.options else "US-Letter"
+            )
+            logger.info(f"[DEBUG] ✓ CSS loaded successfully")
+            logger.info(f"[DEBUG] CSS length: {len(css)} characters")
+            logger.info(f"[DEBUG] CSS starts with: {css[:200]}")
+            
+            if len(css) == 0:
+                logger.error(f"[DEBUG] ⚠️ WARNING: CSS file is EMPTY!")
+            
+        except FileNotFoundError as e:
+            logger.error(f"[DEBUG] ❌ CSS file not found: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"[DEBUG] ❌ Error loading CSS: {e}")
+            raise
         
         # Inject CSS into HTML
         styled_html = inject_css_into_html(request.html, css)
+        logger.info(f"[DEBUG] Original HTML length: {len(request.html)}")
+        logger.info(f"[DEBUG] Styled HTML length: {len(styled_html)}")
+        logger.info(f"[DEBUG] Contains <style> tag: {'<style>' in styled_html}")
         
         # Initialize DocRaptor client
         doc_api = get_docraptor_client()

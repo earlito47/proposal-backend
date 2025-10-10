@@ -29,22 +29,30 @@ TEMPLATES = [
     {
         "id": "proposal",
         "name": "Professional Proposal",
-        "pageSize": "US-Letter"
+        "description": "Clean, professional design with Inter and Merriweather fonts",
+        "pageSize": "US-Letter",
+        "previewUrl": "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=400&h=300&fit=crop"
     },
     {
         "id": "modern-tech",
         "name": "Modern Tech",
-        "pageSize": "US-Letter"
+        "description": "Contemporary tech-focused layout with bold typography",
+        "pageSize": "US-Letter",
+        "previewUrl": "https://images.unsplash.com/photo-1553877522-43269d4ea984?w=400&h=300&fit=crop"
     },
     {
         "id": "docraptor-usletter",
         "name": "DocRaptor Professional (US Letter)",
-        "pageSize": "US-Letter"
+        "description": "Full-featured design with cover page, headers, and cyan accents",
+        "pageSize": "US-Letter",
+        "previewUrl": "https://images.unsplash.com/photo-1568792923760-d70635a89fdc?w=400&h=300&fit=crop"
     },
     {
         "id": "docraptor-a4",
         "name": "DocRaptor Professional (A4)",
-        "pageSize": "A4"
+        "description": "Full-featured design with cover page, headers, and cyan accents",
+        "pageSize": "A4",
+        "previewUrl": "https://images.unsplash.com/photo-1568792923760-d70635a89fdc?w=400&h=300&fit=crop"
     }
 ]
 
@@ -63,14 +71,28 @@ class GeneratePreviewRequest(BaseModel):
     templateId: str
     pages: int = 2
 
+# Environment configuration
+DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY") or os.getenv("DOCRAPTOR_API_TOKEN") or ""
+DOCRAPTOR_TEST_MODE = os.getenv("DOCRAPTOR_TEST_MODE", "false").lower() == "true"
+
+# Log configuration at startup (never log the actual key)
+if not DOCRAPTOR_API_KEY:
+    logger.error("[PDF] DocRaptor API key missing (set DOCRAPTOR_API_KEY)")
+else:
+    logger.info(f"[PDF] DocRaptor key configured: {bool(DOCRAPTOR_API_KEY)}")
+    logger.info(f"[PDF] DocRaptor test mode: {DOCRAPTOR_TEST_MODE}")
+
 # DocRaptor client initialization
 def get_docraptor_client():
-    api_key = os.getenv("DOCRAPTOR_API_KEY")
-    if not api_key:
+    """Initialize DocRaptor client with proper authentication"""
+    if not DOCRAPTOR_API_KEY:
         raise HTTPException(status_code=500, detail="DocRaptor API key not configured")
     
-    docraptor.configuration.username = api_key
-    return docraptor.DocApi()
+    # CRITICAL: Must set username on api_client.configuration, not on docraptor.configuration
+    doc_api = docraptor.DocApi()
+    doc_api.api_client.configuration.username = DOCRAPTOR_API_KEY
+    
+    return doc_api
 
 # Load template CSS (for non-wrapper templates)
 def load_template_css(template_id: str, page_size: str = "US-Letter") -> str:
@@ -263,6 +285,25 @@ async def get_templates():
     logger.info(f"Returning {len(TEMPLATES)} templates")
     return TEMPLATES
 
+# Diagnostic endpoint for DocRaptor configuration
+@app.get("/api/v1/diag/docraptor")
+async def docraptor_diagnostics():
+    """Check DocRaptor configuration without exposing sensitive data"""
+    try:
+        # Check if client can be initialized
+        doc_api = get_docraptor_client()
+        sdk_username_set = bool(doc_api.api_client.configuration.username)
+    except Exception as e:
+        sdk_username_set = False
+    
+    return {
+        "key_present": bool(DOCRAPTOR_API_KEY),
+        "key_length": len(DOCRAPTOR_API_KEY) if DOCRAPTOR_API_KEY else 0,
+        "test_mode": DOCRAPTOR_TEST_MODE,
+        "sdk_username_set": sdk_username_set,
+        "status": "configured" if DOCRAPTOR_API_KEY and sdk_username_set else "missing_config"
+    }
+
 # Generate PDF
 @app.post("/api/v1/generate-pdf")
 async def generate_pdf(request: GeneratePDFRequest):
@@ -310,11 +351,13 @@ async def generate_pdf(request: GeneratePDFRequest):
         
         # Generate PDF
         logger.info("Calling DocRaptor API...")
+        logger.info(f"[PDF] Request details - test_mode={DOCRAPTOR_TEST_MODE}, key_present={bool(DOCRAPTOR_API_KEY)}")
+        
         pdf_response = doc_api.create_doc({
             "document_content": final_html,
             "name": "proposal.pdf",
             "document_type": "pdf",
-            "test": request.options.test if request.options else False,
+            "test": DOCRAPTOR_TEST_MODE,
             "prince_options": {
                 "media": "print",
                 "profile": "PDF/A-1b",
@@ -332,11 +375,21 @@ async def generate_pdf(request: GeneratePDFRequest):
         )
         
     except docraptor.rest.ApiException as e:
-        logger.error(f"DocRaptor API error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
-        )
+        status = getattr(e, 'status', None)
+        logger.error(f"DocRaptor API error: status={status}, key_present={bool(DOCRAPTOR_API_KEY)}, test_mode={DOCRAPTOR_TEST_MODE}")
+        logger.error(f"DocRaptor error details: {str(e)}")
+        
+        # Return clear error to frontend
+        if status == 401:
+            raise HTTPException(
+                status_code=502,
+                detail="PDF service authentication failed. Please check DocRaptor API key configuration."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
+            )
     except Exception as e:
         logger.error(f"Error generating PDF: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -398,11 +451,21 @@ async def generate_preview(request: GeneratePreviewRequest):
         )
         
     except docraptor.rest.ApiException as e:
-        logger.error(f"DocRaptor API error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
-        )
+        status = getattr(e, 'status', None)
+        logger.error(f"DocRaptor API error (preview): status={status}, key_present={bool(DOCRAPTOR_API_KEY)}, test_mode=True")
+        logger.error(f"DocRaptor error details: {str(e)}")
+        
+        # Return clear error to frontend
+        if status == 401:
+            raise HTTPException(
+                status_code=502,
+                detail="PDF preview authentication failed. Please check DocRaptor API key configuration."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
+            )
     except Exception as e:
         logger.error(f"Error generating preview: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

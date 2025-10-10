@@ -1,259 +1,309 @@
-"""
-GovHub Template Backend Service
-Handles PDF generation with templates using DocRaptor
-"""
-
+import os
+import logging
+from datetime import datetime
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, List
+from pydantic import BaseModel
 import docraptor
-import os
-from pathlib import Path
-import logging
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(
-    title="GovHub Template API",
-    description="PDF generation service with template support",
-    version="1.0.0"
-)
+app = FastAPI(title="Proposal Backend API")
 
-# CORS Configuration - Updated with your Lovable URLs
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Local development
-        "http://localhost:5174",  # Alternative local port
-        "https://8365aeb7-4757-4e22-b99e-4605f191ab8b.lovableproject.com",  # Main Lovable project
-        "https://id-preview--8365aeb7-4757-4e22-b99e-4605f191ab8b.lovable.app",  # Your preview URL
-        "https://*--8365aeb7-4757-4e22-b99e-4605f191ab8b.lovable.app",  # All preview branches
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Template directory
-TEMPLATES_DIR = Path(__file__).parent / "templates"
-TEMPLATES_DIR.mkdir(exist_ok=True)
+# Template configurations
+TEMPLATES = [
+    {
+        "id": "proposal",
+        "name": "Professional Proposal",
+        "pageSize": "US-Letter"
+    },
+    {
+        "id": "modern-tech",
+        "name": "Modern Tech",
+        "pageSize": "US-Letter"
+    },
+    {
+        "id": "docraptor-usletter",
+        "name": "DocRaptor Professional (US Letter)",
+        "pageSize": "US-Letter"
+    },
+    {
+        "id": "docraptor-a4",
+        "name": "DocRaptor Professional (A4)",
+        "pageSize": "A4"
+    }
+]
 
-# Pydantic Models
-class Template(BaseModel):
-    id: str
-    name: str
-    description: str
-    thumbnail_url: Optional[str] = None
-    page_size: str = "US-Letter"
-    use_case: Optional[str] = None
-
-
-class PDFOptions(BaseModel):
+# Request models
+class ExportOptions(BaseModel):
     pageSize: str = "US-Letter"
     test: bool = False
 
-
 class GeneratePDFRequest(BaseModel):
-    html: str = Field(..., description="HTML content to convert")
-    templateId: str = Field(..., description="Template ID to apply")
-    options: Optional[PDFOptions] = PDFOptions()
-
+    html: str
+    templateId: str
+    options: Optional[ExportOptions] = None
 
 class GeneratePreviewRequest(BaseModel):
-    html: str = Field(..., description="HTML content to convert")
-    templateId: str = Field(..., description="Template ID to apply")
-    pageCount: int = Field(default=2, ge=1, le=5, description="Number of pages in preview")
+    html: str
+    templateId: str
+    pages: int = 2
 
-
-# Helper Functions
+# DocRaptor client initialization
 def get_docraptor_client():
-    """Initialize DocRaptor API client"""
     api_key = os.getenv("DOCRAPTOR_API_KEY")
     if not api_key:
-        raise ValueError("DOCRAPTOR_API_KEY environment variable not set")
+        raise HTTPException(status_code=500, detail="DocRaptor API key not configured")
     
-    doc_api = docraptor.DocApi()
-    doc_api.api_client.configuration.username = api_key
-    return doc_api
+    docraptor.configuration.username = api_key
+    return docraptor.DocApi()
 
-
+# Load template CSS (for non-wrapper templates)
 def load_template_css(template_id: str, page_size: str = "US-Letter") -> str:
-    """Load CSS file for the specified template"""
-    
-    # Try to load specific template CSS
-    css_filename = f"style.{template_id}.css"
-    css_path = TEMPLATES_DIR / css_filename
-    
-    # Fallback to page-size specific CSS
-    if not css_path.exists():
-        css_filename = f"style.{page_size}.css"
-        css_path = TEMPLATES_DIR / css_filename
-    
-    # Fallback to default
-    if not css_path.exists():
-        css_path = TEMPLATES_DIR / "style.USLetter.css"
-    
-    if not css_path.exists():
-        logger.error(f"Template CSS not found: {css_path}")
-        raise HTTPException(
-            status_code=404,
-            detail=f"Template '{template_id}' not found. Available templates: {list_available_templates()}"
-        )
-    
-    logger.info(f"Loading CSS from: {css_path}")
-    return css_path.read_text(encoding='utf-8')
+    """Load CSS for a template"""
+    try:
+        css_filename = f"style.{template_id}.css"
+        css_path = os.path.join(os.path.dirname(__file__), "templates", css_filename)
+        
+        if not os.path.exists(css_path):
+            logger.warning(f"CSS file not found: {css_path}, using empty CSS")
+            return ""
+        
+        with open(css_path, 'r') as f:
+            css = f.read()
+        
+        logger.info(f"Loading CSS from: {css_path}")
+        return css
+    except Exception as e:
+        logger.error(f"Error loading CSS: {str(e)}")
+        return ""
 
-
-def inject_css_into_html(html: str, css: str) -> str:
-    """Inject CSS stylesheet into HTML document"""
+# Load DocRaptor wrapper template
+def load_docraptor_wrapper(template_id: str) -> tuple[str, str]:
+    """Load wrapper HTML and CSS for DocRaptor templates
     
-    style_tag = f"<style>{css}</style>"
-    
-    # Try to inject before closing </head> tag
-    if "</head>" in html:
-        return html.replace("</head>", f"{style_tag}</head>", 1)
-    
-    # Try to inject after opening <head> tag
-    if "<head>" in html:
-        return html.replace("<head>", f"<head>{style_tag}", 1)
-    
-    # If no head tag, wrap entire HTML
-    if "<html>" in html:
-        return html.replace("<html>", f"<html><head>{style_tag}</head>", 1)
-    
-    # Last resort: prepend to document
-    return f"<html><head>{style_tag}</head><body>{html}</body></html>"
-
-
-def list_available_templates() -> List[str]:
-    """List all available template IDs"""
-    if not TEMPLATES_DIR.exists():
-        return []
-    
-    templates = []
-    for css_file in TEMPLATES_DIR.glob("style.*.css"):
-        # Extract template ID from filename
-        template_id = css_file.stem.replace("style.", "")
-        if template_id not in ["USLetter", "A4"]:  # Skip base templates
-            templates.append(template_id)
-    
-    return templates
-
-
-def truncate_html_for_preview(html: str, page_count: int) -> str:
-    """
-    Attempt to truncate HTML to approximately N pages.
-    This is a rough heuristic - DocRaptor doesn't support page limiting directly.
-    """
-    # Add CSS to force page break after N pages
-    preview_css = f"""
-    <style>
-    @page {{
-        /* Force orphan/widow control */
-    }}
-    /* This is approximate - actual page breaks depend on content */
-    </style>
-    """
-    
-    # Add the preview CSS
-    if "</head>" in html:
-        html = html.replace("</head>", f"{preview_css}</head>", 1)
-    
-    return html
-
-
-# API Endpoints
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "GovHub Template API",
-        "version": "1.0.0"
-    }
-
-
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint for monitoring"""
-    return {
-        "status": "healthy",
-        "service": "GovHub Template API",
-        "timestamp": os.popen('date').read().strip()
-    }
-
-
-@app.get("/api/v1/templates", response_model=List[Template])
-async def get_templates():
-    """
-    List all available proposal templates
+    Returns:
+        tuple: (wrapper_html, css_content)
     """
     try:
-        templates = [
-            Template(
-                id="proposal",
-                name="Professional Proposal",
-                description="Clean, modern template with blue accents and professional layout",
-                page_size="US-Letter",
-                use_case="General business proposals and federal bids"
-            ),
-            Template(
-                id="modern-tech",
-                name="Modern Tech",
-                description="Contemporary design optimized for technology proposals",
-                page_size="US-Letter",
-                use_case="Technology and innovation projects"
-            ),
-        ]
-        logger.info(f"Returning {len(templates)} templates")
-        return templates
+        # Determine folder based on template ID
+        if template_id == "docraptor-usletter":
+            folder = "usletter"
+        elif template_id == "docraptor-a4":
+            folder = "a4"
+        else:
+            raise ValueError(f"Unknown DocRaptor template: {template_id}")
+        
+        # Construct paths
+        base_path = os.path.join(os.path.dirname(__file__), "templates", "docraptor", folder)
+        wrapper_path = os.path.join(base_path, "wrapper.html")
+        css_path = os.path.join(base_path, "style.css")
+        
+        # Load wrapper HTML
+        if not os.path.exists(wrapper_path):
+            raise FileNotFoundError(f"Wrapper HTML not found: {wrapper_path}")
+        
+        with open(wrapper_path, 'r', encoding='utf-8') as f:
+            wrapper_html = f.read()
+        
+        # Load CSS
+        if not os.path.exists(css_path):
+            raise FileNotFoundError(f"CSS file not found: {css_path}")
+        
+        with open(css_path, 'r', encoding='utf-8') as f:
+            css_content = f.read()
+        
+        logger.info(f"Loaded DocRaptor wrapper from: {base_path}")
+        logger.info(f"Wrapper HTML length: {len(wrapper_html)} chars")
+        logger.info(f"CSS length: {len(css_content)} chars")
+        
+        return wrapper_html, css_content
         
     except Exception as e:
-        logger.error(f"Error fetching templates: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error loading DocRaptor wrapper: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load template: {str(e)}")
 
+# Extract content from Supabase HTML
+def extract_proposal_content(html: str) -> dict:
+    """Extract sections and metadata from Supabase-generated HTML
+    
+    Returns:
+        dict: Contains 'title', 'sections', 'date'
+    """
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Extract title (first h1)
+        title_el = soup.select_one('h1')
+        title = title_el.get_text(strip=True) if title_el else 'Proposal'
+        
+        # Extract all sections with class 'section'
+        sections = soup.select('div.section, .section')
+        
+        # If no sections found, try to extract main content
+        if not sections:
+            # Try to find any content divs
+            sections = soup.select('div.document-page > div, main > div')
+        
+        # Convert sections to HTML strings and wrap in chapter divs
+        section_html_list = []
+        for i, section in enumerate(sections):
+            # Wrap each section in a .chapter div for DocRaptor styling
+            section_str = str(section)
+            
+            # Add chapter class if not present
+            if 'class="chapter"' not in section_str and 'class="section"' in section_str:
+                section_str = section_str.replace('class="section"', 'class="chapter"')
+            elif 'class=' not in section_str:
+                section_str = f'<div class="chapter">{section_str}</div>'
+            
+            section_html_list.append(section_str)
+        
+        content_html = "\n".join(section_html_list)
+        
+        # Get current date
+        date = datetime.now().strftime("%m.%d.%y")
+        
+        logger.info(f"Extracted title: {title}")
+        logger.info(f"Extracted {len(section_html_list)} sections")
+        logger.info(f"Content HTML length: {len(content_html)} chars")
+        
+        return {
+            'title': title,
+            'sections': content_html,
+            'date': date
+        }
+        
+    except Exception as e:
+        logger.error(f"Error extracting proposal content: {str(e)}")
+        raise
 
+# Inject content into wrapper
+def inject_content_into_wrapper(wrapper_html: str, css: str, content: dict) -> str:
+    """Replace placeholders in wrapper with actual content
+    
+    Args:
+        wrapper_html: The wrapper HTML template
+        css: The CSS content to inject
+        content: Dictionary with 'title', 'sections', 'date'
+    
+    Returns:
+        str: Final HTML ready for DocRaptor
+    """
+    try:
+        # Default placeholder values
+        defaults = {
+            '{{DOCUMENT_TITLE}}': content.get('title', 'Proposal'),
+            '{{DOCUMENT_DATE}}': content.get('date', datetime.now().strftime("%m.%d.%y")),
+            '{{CLIENT_NAME}}': 'Client Name',
+            '{{LOGO_TEXT}}': 'Logo & Company Name',
+            '{{FOOTER_CONTACT}}': '317.234.8765 | email@company.com | companywebsite.com',
+            '{{COMPANY_WEBSITE}}': 'companywebsite.com',
+            '{{COMPANY_EMAIL}}': 'email@company.com',
+            '{{COMPANY_PHONE}}': '317.213.2345',
+            '{{TEMPLATE_CSS}}': css,
+            '{{PROPOSAL_CONTENT}}': content.get('sections', '')
+        }
+        
+        # Replace all placeholders
+        final_html = wrapper_html
+        for placeholder, value in defaults.items():
+            final_html = final_html.replace(placeholder, value)
+        
+        logger.info(f"Final HTML length: {len(final_html)} chars")
+        logger.info(f"CSS injected: {'{{TEMPLATE_CSS}}' not in final_html}")
+        logger.info(f"Content injected: {'{{PROPOSAL_CONTENT}}' not in final_html}")
+        
+        return final_html
+        
+    except Exception as e:
+        logger.error(f"Error injecting content into wrapper: {str(e)}")
+        raise
+
+# Inject CSS into HTML (for non-wrapper templates)
+def inject_css_into_html(html: str, css: str) -> str:
+    """Inject CSS into HTML <head> section"""
+    if not css:
+        return html
+    
+    css_tag = f"<style>\n{css}\n</style>"
+    
+    if "<head>" in html:
+        return html.replace("<head>", f"<head>\n{css_tag}")
+    else:
+        return f"<html><head>{css_tag}</head><body>{html}</body></html>"
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Proposal Backend API"}
+
+# Health check
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# Get available templates
+@app.get("/api/v1/templates")
+async def get_templates():
+    logger.info(f"Returning {len(TEMPLATES)} templates")
+    return TEMPLATES
+
+# Generate PDF
 @app.post("/api/v1/generate-pdf")
 async def generate_pdf(request: GeneratePDFRequest):
-    """
-    Generate a styled PDF using the specified template
-    
-    - **html**: HTML content from Supabase
-    - **templateId**: Template to apply
-    - **options**: PDF generation options (page size, test mode)
-    """
     try:
         logger.info(f"Generating PDF with template: {request.templateId}")
         
-        # Load template CSS with debug logging
-        try:
+        # Check if this is a DocRaptor wrapper template
+        if request.templateId.startswith("docraptor-"):
+            # Use wrapper approach
+            logger.info("Using DocRaptor wrapper approach")
+            
+            # Load wrapper and CSS
+            wrapper_html, css = load_docraptor_wrapper(request.templateId)
+            
+            # Extract content from Supabase HTML
+            content = extract_proposal_content(request.html)
+            
+            # Inject content into wrapper
+            final_html = inject_content_into_wrapper(wrapper_html, css, content)
+            
+        else:
+            # Use traditional CSS injection approach
+            logger.info("Using traditional CSS injection approach")
+            
+            # Load template CSS
             css = load_template_css(
                 request.templateId,
                 request.options.pageSize if request.options else "US-Letter"
             )
+            
+            # Inject CSS into HTML
+            final_html = inject_css_into_html(request.html, css)
+            
+            # Debug logging
             logger.info(f"[DEBUG] ✓ CSS loaded successfully")
             logger.info(f"[DEBUG] CSS length: {len(css)} characters")
-            logger.info(f"[DEBUG] CSS starts with: {css[:200]}")
-            
-            if len(css) == 0:
-                logger.error(f"[DEBUG] ⚠️ WARNING: CSS file is EMPTY!")
-            
-        except FileNotFoundError as e:
-            logger.error(f"[DEBUG] ❌ CSS file not found: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"[DEBUG] ❌ Error loading CSS: {e}")
-            raise
-        
-        # Inject CSS into HTML
-        styled_html = inject_css_into_html(request.html, css)
-        logger.info(f"[DEBUG] Original HTML length: {len(request.html)}")
-        logger.info(f"[DEBUG] Styled HTML length: {len(styled_html)}")
-        logger.info(f"[DEBUG] Contains <style> tag: {'<style>' in styled_html}")
+            if css:
+                logger.info(f"[DEBUG] CSS starts with: {css[:200]}")
+            logger.info(f"[DEBUG] Original HTML length: {len(request.html)}")
+            logger.info(f"[DEBUG] Styled HTML length: {len(final_html)}")
+            logger.info(f"[DEBUG] Contains <style> tag: {'<style>' in final_html}")
         
         # Initialize DocRaptor client
         doc_api = get_docraptor_client()
@@ -261,7 +311,7 @@ async def generate_pdf(request: GeneratePDFRequest):
         # Generate PDF
         logger.info("Calling DocRaptor API...")
         pdf_response = doc_api.create_doc({
-            "document_content": styled_html,
+            "document_content": final_html,
             "name": "proposal.pdf",
             "document_type": "pdf",
             "test": request.options.test if request.options else False,
@@ -291,38 +341,47 @@ async def generate_pdf(request: GeneratePDFRequest):
         logger.error(f"Error generating PDF: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
+# Generate preview
 @app.post("/api/v1/generate-preview")
 async def generate_preview(request: GeneratePreviewRequest):
-    """
-    Generate a preview PDF (limited to first N pages for faster loading)
-    
-    - **html**: HTML content from Supabase
-    - **templateId**: Template to apply
-    - **pageCount**: Number of pages to include (default: 2, max: 5)
-    """
     try:
-        logger.info(f"Generating preview with template: {request.templateId} ({request.pageCount} pages)")
+        logger.info(f"Generating preview with template: {request.templateId} ({request.pages} pages)")
         
-        # Load template CSS
-        css = load_template_css(request.templateId)
-        
-        # Inject CSS into HTML
-        styled_html = inject_css_into_html(request.html, css)
-        
-        # Truncate HTML for preview (approximate)
-        styled_html = truncate_html_for_preview(styled_html, request.pageCount)
+        # Check if this is a DocRaptor wrapper template
+        if request.templateId.startswith("docraptor-"):
+            # Use wrapper approach
+            logger.info("Using DocRaptor wrapper approach for preview")
+            
+            # Load wrapper and CSS
+            wrapper_html, css = load_docraptor_wrapper(request.templateId)
+            
+            # Extract content from Supabase HTML
+            content = extract_proposal_content(request.html)
+            
+            # Inject content into wrapper
+            final_html = inject_content_into_wrapper(wrapper_html, css, content)
+            
+        else:
+            # Use traditional CSS injection approach
+            logger.info("Using traditional CSS injection for preview")
+            
+            # Load template CSS
+            css = load_template_css(request.templateId)
+            logger.info(f"Loading CSS from: /opt/render/project/src/templates/style.{request.templateId}.css")
+            
+            # Inject CSS into HTML
+            final_html = inject_css_into_html(request.html, css)
         
         # Initialize DocRaptor client
         doc_api = get_docraptor_client()
         
-        # Generate preview PDF (always use test mode for previews)
+        # Generate preview
         logger.info("Calling DocRaptor API for preview...")
         pdf_response = doc_api.create_doc({
-            "document_content": styled_html,
+            "document_content": final_html,
             "name": "preview.pdf",
             "document_type": "pdf",
-            "test": True,  # Always use test mode for previews
+            "test": True,
             "prince_options": {
                 "media": "print",
             }
@@ -348,7 +407,6 @@ async def generate_preview(request: GeneratePreviewRequest):
         logger.error(f"Error generating preview: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
@@ -358,7 +416,6 @@ async def not_found_handler(request, exc):
         media_type="application/json"
     )
 
-
 @app.exception_handler(500)
 async def internal_error_handler(request, exc):
     logger.error(f"Internal error: {str(exc)}")
@@ -367,7 +424,6 @@ async def internal_error_handler(request, exc):
         status_code=500,
         media_type="application/json"
     )
-
 
 if __name__ == "__main__":
     import uvicorn

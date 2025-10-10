@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{DOCUMENT_TITLE}}</title>
+  
+  <!-- Google Fonts - Montserrat -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* CSS will be injected here by backend */
+    {{TEMPLATE_CSS}}
+  </style>
+</head>
+<body>
+  <!-- Empty header for border on all pages except cover -->
+  <header></header>
+  
+  <!-- Footer with contact info -->
+  <footer>
+    <hr />
+    <span>{{FOOTER_CONTACT}}</span>
+  </footer>
+  
+  <!-- Cover Page -->
+  <div class="coverPage">
+    <div class="logo">
+      <span>{{LOGO_TEXT}}</span>
+    </div>
+    <h1>{{DOCUMENT_TITLE}}</h1>
+    <h2>Prepared for</h2>
+    <h3>{{CLIENT_NAME}}</h3>
+    <h3>{{DOCUMENT_DATE}}</h3>
+    <div class="address">
+      <b><a href="{{COMPANY_WEBSITE}}">{{COMPANY_WEBSITE}}</a></b><br />
+      <a href="mailto:{{COMPANY_EMAIL}}">{{COMPANY_EMAIL}}</a><br />
+      {{COMPANY_PHONE}}
+    </div>
+  </div>
+  
+  <!-- PROPOSAL CONTENT INJECTION POINT -->
+  {{PROPOSAL_CONTENT}}
+  
+</body>
+</html>

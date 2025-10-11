@@ -1,492 +1,579 @@
+"""
+GovHub Proposal Backend - FastAPI Application
+Handles PDF/DOCX export with template styling and metadata injection
+"""
 import os
 import logging
-from datetime import datetime
-from typing import Optional
-from fastapi import FastAPI, HTTPException, Response
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 import docraptor
 from bs4 import BeautifulSoup
+from supabase import create_client, Client
+
+# Import our custom modules
+from src.metadata_extractor import (
+    extract_metadata_from_html,
+    extract_toc_from_html,
+    generate_appendix_list_html
+)
+from src.pdf_merger import PDFMerger
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="Proposal Backend API")
+app = FastAPI(title="GovHub Proposal Backend", version="2.0.0")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Configure this for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Template configurations
-TEMPLATES = [
-    {
-        "id": "proposal",
-        "name": "Professional Proposal",
-        "description": "Clean, professional design with Inter and Merriweather fonts",
-        "pageSize": "US-Letter",
-        "previewUrl": "https://images.unsplash.com/photo-1586281380349-632531db7ed4?w=400&h=300&fit=crop"
-    },
-    {
-        "id": "modern-tech",
-        "name": "Modern Tech",
-        "description": "Contemporary tech-focused layout with bold typography",
-        "pageSize": "US-Letter",
-        "previewUrl": "https://images.unsplash.com/photo-1553877522-43269d4ea984?w=400&h=300&fit=crop"
-    },
-    {
-        "id": "docraptor-usletter",
-        "name": "DocRaptor Professional (US Letter)",
-        "description": "Full-featured design with cover page, headers, and cyan accents",
-        "pageSize": "US-Letter",
-        "previewUrl": "https://images.unsplash.com/photo-1568792923760-d70635a89fdc?w=400&h=300&fit=crop"
-    },
-    {
-        "id": "docraptor-a4",
-        "name": "DocRaptor Professional (A4)",
-        "description": "Full-featured design with cover page, headers, and cyan accents",
-        "pageSize": "A4",
-        "previewUrl": "https://images.unsplash.com/photo-1568792923760-d70635a89fdc?w=400&h=300&fit=crop"
-    }
-]
+# Initialize Supabase client (for PDF merging)
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
 
-# Request models
-class ExportOptions(BaseModel):
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    logger.info("✓ Supabase client initialized")
+else:
+    logger.warning("⚠ Supabase credentials not found - PDF merging disabled")
+    supabase = None
+
+
+# ============================================================================
+# Pydantic Models
+# ============================================================================
+
+class PDFOptions(BaseModel):
+    """Options for PDF generation"""
     pageSize: str = "US-Letter"
     test: bool = False
+    includeAppendices: bool = False  # Flag for PDF merging
+
 
 class GeneratePDFRequest(BaseModel):
+    """Request model for PDF generation"""
     html: str
     templateId: str
-    options: Optional[ExportOptions] = None
+    options: Optional[PDFOptions] = None
+    metadata: Optional[Dict[str, Any]] = None  # Includes proposalId, client info, etc.
 
-class GeneratePreviewRequest(BaseModel):
-    html: str
-    templateId: str
-    pages: int = 2
 
-# Environment configuration
-DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY") or os.getenv("DOCRAPTOR_API_TOKEN") or ""
-DOCRAPTOR_TEST_MODE = os.getenv("DOCRAPTOR_TEST_MODE", "false").lower() == "true"
+# ============================================================================
+# Template Management
+# ============================================================================
 
-# Log configuration at startup (never log the actual key)
-if not DOCRAPTOR_API_KEY:
-    logger.error("[PDF] DocRaptor API key missing (set DOCRAPTOR_API_KEY)")
-else:
-    logger.info(f"[PDF] DocRaptor key configured: {bool(DOCRAPTOR_API_KEY)}")
-    logger.info(f"[PDF] DocRaptor test mode: {DOCRAPTOR_TEST_MODE}")
-
-# DocRaptor client initialization
-def get_docraptor_client():
-    """Initialize DocRaptor client with proper authentication"""
-    if not DOCRAPTOR_API_KEY:
-        raise HTTPException(status_code=500, detail="DocRaptor API key not configured")
-    
-    # CRITICAL: Must set username on api_client.configuration, not on docraptor.configuration
-    doc_api = docraptor.DocApi()
-    doc_api.api_client.configuration.username = DOCRAPTOR_API_KEY
-    
-    return doc_api
-
-# Load template CSS (for non-wrapper templates)
 def load_template_css(template_id: str, page_size: str = "US-Letter") -> str:
-    """Load CSS for a template"""
+    """Load CSS for a specific template"""
     try:
-        css_filename = f"style.{template_id}.css"
-        css_path = os.path.join(os.path.dirname(__file__), "templates", css_filename)
+        page_size_folder = page_size.lower().replace("-", "")  # "US-Letter" -> "usletter"
+        css_path = Path(f"templates/docraptor/{page_size_folder}/style.css")
         
-        if not os.path.exists(css_path):
-            logger.warning(f"CSS file not found: {css_path}, using empty CSS")
+        if not css_path.exists():
+            logger.warning(f"[Template CSS] File not found: {css_path}")
             return ""
         
-        with open(css_path, 'r') as f:
+        with open(css_path, 'r', encoding='utf-8') as f:
             css = f.read()
         
-        logger.info(f"Loading CSS from: {css_path}")
+        logger.info(f"[Template CSS] ✓ Loaded {len(css)} characters from {css_path}")
         return css
+        
     except Exception as e:
-        logger.error(f"Error loading CSS: {str(e)}")
+        logger.error(f"[Template CSS] Failed to load: {str(e)}")
         return ""
 
-# Load DocRaptor wrapper template
-def load_docraptor_wrapper(template_id: str) -> tuple[str, str]:
-    """Load wrapper HTML and CSS for DocRaptor templates
-    
-    Returns:
-        tuple: (wrapper_html, css_content)
-    """
-    try:
-        # Determine folder based on template ID
-        if template_id == "docraptor-usletter":
-            folder = "usletter"
-        elif template_id == "docraptor-a4":
-            folder = "a4"
-        else:
-            raise ValueError(f"Unknown DocRaptor template: {template_id}")
-        
-        # Construct paths
-        base_path = os.path.join(os.path.dirname(__file__), "templates", "docraptor", folder)
-        wrapper_path = os.path.join(base_path, "wrapper.html")
-        css_path = os.path.join(base_path, "style.css")
-        
-        # Load wrapper HTML
-        if not os.path.exists(wrapper_path):
-            raise FileNotFoundError(f"Wrapper HTML not found: {wrapper_path}")
-        
-        with open(wrapper_path, 'r', encoding='utf-8') as f:
-            wrapper_html = f.read()
-        
-        # Load CSS
-        if not os.path.exists(css_path):
-            raise FileNotFoundError(f"CSS file not found: {css_path}")
-        
-        with open(css_path, 'r', encoding='utf-8') as f:
-            css_content = f.read()
-        
-        logger.info(f"Loaded DocRaptor wrapper from: {base_path}")
-        logger.info(f"Wrapper HTML length: {len(wrapper_html)} chars")
-        logger.info(f"CSS length: {len(css_content)} chars")
-        
-        return wrapper_html, css_content
-        
-    except Exception as e:
-        logger.error(f"Error loading DocRaptor wrapper: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to load template: {str(e)}")
 
-# Extract content from Supabase HTML
-def extract_proposal_content(html: str) -> dict:
-    """Extract sections and metadata from Supabase-generated HTML
-    
-    Returns:
-        dict: Contains 'title', 'sections', 'date'
-    """
-    try:
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Extract title (first h1)
-        title_el = soup.select_one('h1')
-        title = title_el.get_text(strip=True) if title_el else 'Proposal'
-        
-        # Extract all sections with class 'section'
-        sections = soup.select('div.section, .section')
-        
-        # If no sections found, try to extract main content
-        if not sections:
-            # Try to find any content divs
-            sections = soup.select('div.document-page > div, main > div')
-        
-        # Convert sections to HTML strings and wrap in chapter divs
-        section_html_list = []
-        for i, section in enumerate(sections):
-            # Wrap each section in a .chapter div for DocRaptor styling
-            section_str = str(section)
-            
-            # Add chapter class if not present
-            if 'class="chapter"' not in section_str and 'class="section"' in section_str:
-                section_str = section_str.replace('class="section"', 'class="chapter"')
-            elif 'class=' not in section_str:
-                section_str = f'<div class="chapter">{section_str}</div>'
-            
-            section_html_list.append(section_str)
-        
-        content_html = "\n".join(section_html_list)
-        
-        # Get current date
-        date = datetime.now().strftime("%m.%d.%y")
-        
-        logger.info(f"Extracted title: {title}")
-        logger.info(f"Extracted {len(section_html_list)} sections")
-        logger.info(f"Content HTML length: {len(content_html)} chars")
-        
-        return {
-            'title': title,
-            'sections': content_html,
-            'date': date
-        }
-        
-    except Exception as e:
-        logger.error(f"Error extracting proposal content: {str(e)}")
-        raise
-
-# Inject content into wrapper
-def inject_content_into_wrapper(wrapper_html: str, css: str, content: dict) -> str:
-    """Replace placeholders in wrapper with actual content
-    
-    Args:
-        wrapper_html: The wrapper HTML template
-        css: The CSS content to inject
-        content: Dictionary with 'title', 'sections', 'date'
-    
-    Returns:
-        str: Final HTML ready for DocRaptor
-    """
-    try:
-        # Default placeholder values
-        defaults = {
-            '{{DOCUMENT_TITLE}}': content.get('title', 'Proposal'),
-            '{{DOCUMENT_DATE}}': content.get('date', datetime.now().strftime("%m.%d.%y")),
-            '{{CLIENT_NAME}}': 'Client Name',
-            '{{LOGO_TEXT}}': 'Logo & Company Name',
-            '{{FOOTER_CONTACT}}': '317.234.8765 | email@company.com | companywebsite.com',
-            '{{COMPANY_WEBSITE}}': 'companywebsite.com',
-            '{{COMPANY_EMAIL}}': 'email@company.com',
-            '{{COMPANY_PHONE}}': '317.213.2345',
-            '{{TEMPLATE_CSS}}': css,
-            '{{PROPOSAL_CONTENT}}': content.get('sections', '')
-        }
-        
-        # Replace all placeholders
-        final_html = wrapper_html
-        for placeholder, value in defaults.items():
-            final_html = final_html.replace(placeholder, value)
-        
-        logger.info(f"Final HTML length: {len(final_html)} chars")
-        logger.info(f"CSS injected: {'{{TEMPLATE_CSS}}' not in final_html}")
-        logger.info(f"Content injected: {'{{PROPOSAL_CONTENT}}' not in final_html}")
-        
-        return final_html
-        
-    except Exception as e:
-        logger.error(f"Error injecting content into wrapper: {str(e)}")
-        raise
-
-# Inject CSS into HTML (for non-wrapper templates)
 def inject_css_into_html(html: str, css: str) -> str:
-    """Inject CSS into HTML <head> section"""
+    """Inject CSS into HTML document"""
     if not css:
+        logger.warning("[CSS Injection] No CSS provided, returning original HTML")
         return html
     
-    css_tag = f"<style>\n{css}\n</style>"
-    
-    if "<head>" in html:
-        return html.replace("<head>", f"<head>\n{css_tag}")
-    else:
-        return f"<html><head>{css_tag}</head><body>{html}</body></html>"
-
-# Root endpoint
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Proposal Backend API"}
-
-# Health check
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-# Get available templates
-@app.get("/api/v1/templates")
-async def get_templates():
-    logger.info(f"Returning {len(TEMPLATES)} templates")
-    return TEMPLATES
-
-# Diagnostic endpoint for DocRaptor configuration
-@app.get("/api/v1/diag/docraptor")
-async def docraptor_diagnostics():
-    """Check DocRaptor configuration without exposing sensitive data"""
     try:
-        # Check if client can be initialized
-        doc_api = get_docraptor_client()
-        sdk_username_set = bool(doc_api.api_client.configuration.username)
+        # Check if HTML already has style tag
+        if '<style>' in html and '</style>' in html:
+            # Replace existing style content
+            soup = BeautifulSoup(html, 'html.parser')
+            style_tag = soup.find('style')
+            if style_tag:
+                style_tag.string = css
+                result = str(soup)
+            else:
+                result = html.replace('</head>', f'<style>{css}</style></head>')
+        else:
+            # Inject new style tag
+            if '</head>' in html:
+                result = html.replace('</head>', f'<style>{css}</style></head>')
+            else:
+                result = f'<style>{css}</style>{html}'
+        
+        logger.info(f"[CSS Injection] ✓ Injected {len(css)} characters")
+        return result
+        
     except Exception as e:
-        sdk_username_set = False
-    
-    return {
-        "key_present": bool(DOCRAPTOR_API_KEY),
-        "key_length": len(DOCRAPTOR_API_KEY) if DOCRAPTOR_API_KEY else 0,
-        "test_mode": DOCRAPTOR_TEST_MODE,
-        "sdk_username_set": sdk_username_set,
-        "status": "configured" if DOCRAPTOR_API_KEY and sdk_username_set else "missing_config"
-    }
+        logger.error(f"[CSS Injection] Failed: {str(e)}")
+        return html
 
-# Generate PDF
+
+def load_wrapper_template(page_size: str = "US-Letter") -> str:
+    """Load DocRaptor wrapper template"""
+    try:
+        page_size_folder = page_size.lower().replace("-", "")
+        wrapper_path = Path(f"templates/docraptor/{page_size_folder}/wrapper.html")
+        
+        if not wrapper_path.exists():
+            logger.warning(f"[Wrapper] File not found: {wrapper_path}")
+            return ""
+        
+        with open(wrapper_path, 'r', encoding='utf-8') as f:
+            wrapper = f.read()
+        
+        logger.info(f"[Wrapper] ✓ Loaded from {wrapper_path}")
+        return wrapper
+        
+    except Exception as e:
+        logger.error(f"[Wrapper] Failed to load: {str(e)}")
+        return ""
+
+
+# ============================================================================
+# DocRaptor Client
+# ============================================================================
+
+def get_docraptor_client():
+    """Initialize DocRaptor API client"""
+    api_key = os.getenv('DOCRAPTOR_API_KEY')
+    if not api_key:
+        raise ValueError("DOCRAPTOR_API_KEY environment variable not set")
+    
+    doc_api = docraptor.DocApi()
+    doc_api.api_client.configuration.username = api_key
+    
+    logger.info("✓ DocRaptor client initialized")
+    return doc_api
+
+
+# ============================================================================
+# Main PDF Generation Endpoint
+# ============================================================================
+
 @app.post("/api/v1/generate-pdf")
 async def generate_pdf(request: GeneratePDFRequest):
+    """
+    Generate PDF from HTML with template styling and metadata
+    
+    - Extracts metadata from HTML and request
+    - Generates table of contents
+    - Injects CSS styling
+    - Populates wrapper template with metadata
+    - Generates PDF using DocRaptor
+    """
     try:
-        logger.info(f"Generating PDF with template: {request.templateId}")
+        logger.info(f"[PDF Generation] Starting - Template: {request.templateId}")
         
-        # Check if this is a DocRaptor wrapper template
-        if request.templateId.startswith("docraptor-"):
-            # Use wrapper approach
-            logger.info("Using DocRaptor wrapper approach")
-            
-            # Load wrapper and CSS
-            wrapper_html, css = load_docraptor_wrapper(request.templateId)
-            
-            # Extract content from Supabase HTML
-            content = extract_proposal_content(request.html)
-            
-            # Inject content into wrapper
-            final_html = inject_content_into_wrapper(wrapper_html, css, content)
-            
-        else:
-            # Use traditional CSS injection approach
-            logger.info("Using traditional CSS injection approach")
-            
-            # Load template CSS
-            css = load_template_css(
-                request.templateId,
-                request.options.pageSize if request.options else "US-Letter"
-            )
-            
-            # Inject CSS into HTML
-            final_html = inject_css_into_html(request.html, css)
-            
-            # Debug logging
-            logger.info(f"[DEBUG] ✓ CSS loaded successfully")
-            logger.info(f"[DEBUG] CSS length: {len(css)} characters")
-            if css:
-                logger.info(f"[DEBUG] CSS starts with: {css[:200]}")
-            logger.info(f"[DEBUG] Original HTML length: {len(request.html)}")
-            logger.info(f"[DEBUG] Styled HTML length: {len(final_html)}")
-            logger.info(f"[DEBUG] Contains <style> tag: {'<style>' in final_html}")
+        # ====================================================================
+        # STEP 1: Load Template Assets
+        # ====================================================================
+        page_size = request.options.pageSize if request.options else "US-Letter"
         
-        # Initialize DocRaptor client
+        # Load CSS
+        css = load_template_css(request.templateId, page_size)
+        if not css:
+            logger.warning("[PDF Generation] No CSS loaded, proceeding without styling")
+        
+        # Load wrapper
+        wrapper_html = load_wrapper_template(page_size)
+        if not wrapper_html:
+            logger.warning("[PDF Generation] No wrapper loaded, using direct HTML")
+            wrapper_html = "{{PROPOSAL_CONTENT}}"  # Minimal wrapper
+        
+        # ====================================================================
+        # STEP 2: Extract Metadata
+        # ====================================================================
+        proposal_data = {}
+        if request.metadata:
+            proposal_data = {
+                'title': request.metadata.get('title'),
+                'client_name': request.metadata.get('preparedFor'),
+                'rfp_title': request.metadata.get('rfpTitle'),
+            }
+        
+        metadata = extract_metadata_from_html(request.html, proposal_data)
+        logger.info(f"[Metadata] Extracted: {metadata}")
+        
+        # ====================================================================
+        # STEP 3: Extract/Generate Table of Contents
+        # ====================================================================
+        toc_html = extract_toc_from_html(request.html)
+        logger.info(f"[TOC] Generated {len(toc_html)} characters")
+        
+        # ====================================================================
+        # STEP 4: Get Company Info (from env vars or request)
+        # ====================================================================
+        company_name = os.getenv('COMPANY_NAME', '')
+        company_website = os.getenv('COMPANY_WEBSITE', '')
+        company_email = os.getenv('COMPANY_EMAIL', '')
+        company_logo_url = os.getenv('COMPANY_LOGO_URL', '')
+        
+        # Override with request metadata if provided
+        if request.metadata:
+            company_name = request.metadata.get('companyName', company_name)
+            company_website = request.metadata.get('companyWebsite', company_website)
+            company_email = request.metadata.get('companyEmail', company_email)
+            company_logo_url = request.metadata.get('logoUrl', company_logo_url)
+        
+        # ====================================================================
+        # STEP 5: Inject CSS into Proposal Content
+        # ====================================================================
+        styled_html = inject_css_into_html(request.html, css)
+        
+        # ====================================================================
+        # STEP 6: Populate Wrapper Template
+        # ====================================================================
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
+        wrapper_html = wrapper_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
+        wrapper_html = wrapper_html.replace('{{COMPANY_NAME}}', company_name)
+        wrapper_html = wrapper_html.replace('{{COMPANY_WEBSITE}}', company_website)
+        wrapper_html = wrapper_html.replace('{{COMPANY_EMAIL}}', company_email)
+        wrapper_html = wrapper_html.replace('{{LOGO_URL}}', company_logo_url)
+        wrapper_html = wrapper_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_CONTENT}}', styled_html)
+        
+        logger.info("[Wrapper] ✓ All placeholders replaced")
+        
+        # ====================================================================
+        # STEP 7: Generate PDF with DocRaptor
+        # ====================================================================
         doc_api = get_docraptor_client()
         
-        # Generate PDF
-        logger.info("Calling DocRaptor API...")
-        logger.info(f"[PDF] Request details - test_mode={DOCRAPTOR_TEST_MODE}, key_present={bool(DOCRAPTOR_API_KEY)}")
+        test_mode = request.options.test if request.options else False
+        logger.info(f"[DocRaptor] Calling API (test mode: {test_mode})")
         
         pdf_response = doc_api.create_doc({
-            "document_content": final_html,
-            "name": "proposal.pdf",
+            "document_content": wrapper_html,
+            "name": f"{metadata['title']}.pdf",
             "document_type": "pdf",
-            "test": DOCRAPTOR_TEST_MODE,
+            "test": test_mode,
             "prince_options": {
                 "media": "print",
                 "profile": "PDF/A-1b",
             }
         })
         
-        logger.info("PDF generated successfully")
+        logger.info(f"[PDF Generation] ✓ Complete - {len(pdf_response)} bytes")
         
+        # ====================================================================
+        # STEP 8: Return PDF
+        # ====================================================================
         return Response(
             content=pdf_response,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": "attachment; filename=proposal.pdf"
+                "Content-Disposition": f'attachment; filename="{metadata["title"]}.pdf"'
             }
         )
         
     except docraptor.rest.ApiException as e:
-        status = getattr(e, 'status', None)
-        logger.error(f"DocRaptor API error: status={status}, key_present={bool(DOCRAPTOR_API_KEY)}, test_mode={DOCRAPTOR_TEST_MODE}")
-        logger.error(f"DocRaptor error details: {str(e)}")
+        logger.error(f"[DocRaptor] API Error: {str(e)}")
+        error_detail = e.body if hasattr(e, 'body') else str(e)
+        raise HTTPException(status_code=502, detail=f"DocRaptor error: {error_detail}")
         
-        # Return clear error to frontend
-        if status == 401:
-            raise HTTPException(
-                status_code=502,
-                detail="PDF service authentication failed. Please check DocRaptor API key configuration."
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
-            )
     except Exception as e:
-        logger.error(f"Error generating PDF: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[PDF Generation] ✗ Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
-# Generate preview
-@app.post("/api/v1/generate-preview")
-async def generate_preview(request: GeneratePreviewRequest):
+
+# ============================================================================
+# PDF Generation with Appendices (Merged)
+# ============================================================================
+
+@app.post("/api/v1/generate-pdf-with-appendices")
+async def generate_pdf_with_appendices(request: GeneratePDFRequest):
+    """
+    Generate PDF with appendices merged
+    
+    - Generates main proposal PDF
+    - Fetches PDF attachments from Supabase
+    - Merges attachments as appendices
+    - Returns complete merged PDF
+    """
     try:
-        logger.info(f"Generating preview with template: {request.templateId} ({request.pages} pages)")
+        logger.info("[PDF + Appendices] Starting generation")
         
-        # Check if this is a DocRaptor wrapper template
-        if request.templateId.startswith("docraptor-"):
-            # Use wrapper approach
-            logger.info("Using DocRaptor wrapper approach for preview")
-            
-            # Load wrapper and CSS
-            wrapper_html, css = load_docraptor_wrapper(request.templateId)
-            
-            # Extract content from Supabase HTML
-            content = extract_proposal_content(request.html)
-            
-            # Inject content into wrapper
-            final_html = inject_content_into_wrapper(wrapper_html, css, content)
-            
-        else:
-            # Use traditional CSS injection approach
-            logger.info("Using traditional CSS injection for preview")
-            
-            # Load template CSS
-            css = load_template_css(request.templateId)
-            logger.info(f"Loading CSS from: /opt/render/project/src/templates/style.{request.templateId}.css")
-            
-            # Inject CSS into HTML
-            final_html = inject_css_into_html(request.html, css)
+        # Check if Supabase is available
+        if not supabase:
+            raise HTTPException(
+                status_code=503,
+                detail="PDF merging unavailable - Supabase not configured"
+            )
         
-        # Initialize DocRaptor client
+        # Check if user wants appendices
+        include_appendices = False
+        if request.options:
+            include_appendices = request.options.includeAppendices
+        
+        # ====================================================================
+        # STEP 1: Generate Main Proposal PDF (same as generate_pdf)
+        # ====================================================================
+        # We'll reuse the same logic, but extract it to a helper function
+        # For now, call the generate_pdf endpoint internally
+        
+        # Generate main PDF using the same logic
+        page_size = request.options.pageSize if request.options else "US-Letter"
+        css = load_template_css(request.templateId, page_size)
+        wrapper_html = load_wrapper_template(page_size)
+        
+        proposal_data = {}
+        if request.metadata:
+            proposal_data = {
+                'title': request.metadata.get('title'),
+                'client_name': request.metadata.get('preparedFor'),
+                'rfp_title': request.metadata.get('rfpTitle'),
+            }
+        
+        metadata = extract_metadata_from_html(request.html, proposal_data)
+        toc_html = extract_toc_from_html(request.html)
+        
+        # Get company info
+        company_name = os.getenv('COMPANY_NAME', request.metadata.get('companyName', '') if request.metadata else '')
+        company_website = os.getenv('COMPANY_WEBSITE', request.metadata.get('companyWebsite', '') if request.metadata else '')
+        company_email = os.getenv('COMPANY_EMAIL', request.metadata.get('companyEmail', '') if request.metadata else '')
+        company_logo_url = os.getenv('COMPANY_LOGO_URL', request.metadata.get('logoUrl', '') if request.metadata else '')
+        
+        styled_html = inject_css_into_html(request.html, css)
+        
+        # Populate wrapper
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
+        wrapper_html = wrapper_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
+        wrapper_html = wrapper_html.replace('{{COMPANY_NAME}}', company_name)
+        wrapper_html = wrapper_html.replace('{{COMPANY_WEBSITE}}', company_website)
+        wrapper_html = wrapper_html.replace('{{COMPANY_EMAIL}}', company_email)
+        wrapper_html = wrapper_html.replace('{{LOGO_URL}}', company_logo_url)
+        wrapper_html = wrapper_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
+        wrapper_html = wrapper_html.replace('{{PROPOSAL_CONTENT}}', styled_html)
+        
+        # Generate main PDF
         doc_api = get_docraptor_client()
+        test_mode = request.options.test if request.options else False
         
-        # Generate preview
-        logger.info("Calling DocRaptor API for preview...")
-        pdf_response = doc_api.create_doc({
-            "document_content": final_html,
-            "name": "preview.pdf",
+        main_pdf_bytes = doc_api.create_doc({
+            "document_content": wrapper_html,
+            "name": f"{metadata['title']}.pdf",
             "document_type": "pdf",
-            "test": True,
+            "test": test_mode,
             "prince_options": {
                 "media": "print",
+                "profile": "PDF/A-1b",
             }
         })
         
-        logger.info("Preview generated successfully")
+        logger.info(f"[Main PDF] ✓ Generated {len(main_pdf_bytes)} bytes")
         
+        # If not including appendices, return main PDF
+        if not include_appendices:
+            logger.info("[PDF + Appendices] Returning main PDF only")
+            return Response(
+                content=main_pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{metadata["title"]}.pdf"'
+                }
+            )
+        
+        # ====================================================================
+        # STEP 2: Fetch Attachments from Supabase
+        # ====================================================================
+        proposal_id = request.metadata.get('proposalId') if request.metadata else None
+        if not proposal_id:
+            logger.warning("[PDF + Appendices] No proposal ID - returning main PDF only")
+            return Response(
+                content=main_pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{metadata["title"]}.pdf"'
+                }
+            )
+        
+        logger.info(f"[Attachments] Fetching for proposal: {proposal_id}")
+        
+        # Query section_attachments table
+        result = supabase.table('section_attachments') \
+            .select('library_item_id, library_documents(storage_path, title, mime_type, original_filename)') \
+            .eq('proposal_id', proposal_id) \
+            .execute()
+        
+        # Filter for PDF attachments only
+        pdf_attachments = []
+        for item in result.data:
+            if not item.get('library_documents'):
+                continue
+            
+            doc = item['library_documents']
+            mime_type = doc.get('mime_type', '')
+            
+            if mime_type == 'application/pdf':
+                storage_path = doc.get('storage_path')
+                title = doc.get('title') or doc.get('original_filename', 'Attachment')
+                
+                # Get public URL
+                public_url = supabase.storage.from_('rfp-uploads').get_public_url(storage_path)
+                
+                pdf_attachments.append({
+                    'title': title,
+                    'url': public_url,
+                    'file_type': 'PDF'
+                })
+        
+        logger.info(f"[Attachments] Found {len(pdf_attachments)} PDF attachments")
+        
+        if not pdf_attachments:
+            logger.info("[PDF + Appendices] No PDF attachments - returning main PDF only")
+            return Response(
+                content=main_pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{metadata["title"]}.pdf"'
+                }
+            )
+        
+        # ====================================================================
+        # STEP 3: Merge PDFs
+        # ====================================================================
+        logger.info("[PDF Merger] Starting merge process")
+        merger = PDFMerger()
+        merger.add_main_pdf(main_pdf_bytes)
+        
+        for attachment in pdf_attachments:
+            merger.add_attachment(
+                title=attachment['title'],
+                pdf_url=attachment['url'],
+                file_type=attachment['file_type']
+            )
+        
+        merged_pdf_bytes = merger.merge_all()
+        
+        logger.info(f"[PDF + Appendices] ✓ Complete - {len(merged_pdf_bytes)} bytes")
+        
+        # ====================================================================
+        # STEP 4: Return Merged PDF
+        # ====================================================================
         return Response(
-            content=pdf_response,
+            content=merged_pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": "inline; filename=preview.pdf"
+                "Content-Disposition": f'attachment; filename="{metadata["title"]}_with_appendices.pdf"'
             }
         )
         
-    except docraptor.rest.ApiException as e:
-        status = getattr(e, 'status', None)
-        logger.error(f"DocRaptor API error (preview): status={status}, key_present={bool(DOCRAPTOR_API_KEY)}, test_mode=True")
-        logger.error(f"DocRaptor error details: {str(e)}")
-        
-        # Return clear error to frontend
-        if status == 401:
-            raise HTTPException(
-                status_code=502,
-                detail="PDF preview authentication failed. Please check DocRaptor API key configuration."
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"DocRaptor error: {e.body if hasattr(e, 'body') else str(e)}"
-            )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error generating preview: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[PDF + Appendices] ✗ Failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation with appendices failed: {str(e)}"
+        )
 
-# Error handlers
+
+# ============================================================================
+# Health Check and Diagnostic Endpoints
+# ============================================================================
+
+@app.get("/")
+async def root():
+    """Root endpoint - health check"""
+    return {
+        "status": "healthy",
+        "service": "GovHub Proposal Backend",
+        "version": "2.0.0",
+        "features": {
+            "pdf_generation": True,
+            "pdf_merging": supabase is not None,
+            "templates": True,
+            "metadata_extraction": True
+        }
+    }
+
+
+@app.get("/api/v1/health")
+async def health():
+    """Detailed health check"""
+    
+    # Check DocRaptor API key
+    docraptor_configured = bool(os.getenv('DOCRAPTOR_API_KEY'))
+    
+    # Check Supabase
+    supabase_configured = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+    
+    # Check template files
+    template_check = {
+        "usletter_wrapper": Path("templates/docraptor/usletter/wrapper.html").exists(),
+        "usletter_css": Path("templates/docraptor/usletter/style.css").exists(),
+        "a4_wrapper": Path("templates/docraptor/a4/wrapper.html").exists(),
+        "a4_css": Path("templates/docraptor/a4/style.css").exists(),
+    }
+    
+    return {
+        "status": "healthy",
+        "checks": {
+            "docraptor": docraptor_configured,
+            "supabase": supabase_configured,
+            "templates": all(template_check.values())
+        },
+        "template_files": template_check,
+        "environment": {
+            "company_name": bool(os.getenv('COMPANY_NAME')),
+            "company_website": bool(os.getenv('COMPANY_WEBSITE')),
+            "company_email": bool(os.getenv('COMPANY_EMAIL')),
+        }
+    }
+
+
+# ============================================================================
+# Error Handlers
+# ============================================================================
+
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
+    """Handle 404 errors"""
     return Response(
         content='{"error": "Not found"}',
         status_code=404,
         media_type="application/json"
     )
 
+
 @app.exception_handler(500)
 async def internal_error_handler(request, exc):
+    """Handle 500 errors"""
     logger.error(f"Internal error: {str(exc)}")
     return Response(
         content='{"error": "Internal server error"}',
         status_code=500,
         media_type="application/json"
     )
+
+
+# ============================================================================
+# Application Entry Point
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn

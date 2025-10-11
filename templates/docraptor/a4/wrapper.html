@@ -1,48 +1,152 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{DOCUMENT_TITLE}}</title>
-  
-  <!-- Google Fonts - Montserrat -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
-  
-  <style>
-    /* CSS will be injected here by backend */
-    {{TEMPLATE_CSS}}
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{PROPOSAL_TITLE}}</title>
+    
+    <style>
+        /* Page setup - A4 size */
+        @page {
+            size: A4;
+            margin: 20mm;
+        }
+        
+        /* Cover page styling */
+        .cover-page {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+            color: white;
+            page-break-after: always;
+        }
+        
+        .cover-logo {
+            max-width: 200px;
+            max-height: 100px;
+            margin-bottom: 40px;
+        }
+        
+        .cover-title {
+            font-size: 48px;
+            font-weight: 700;
+            margin-bottom: 20px;
+            font-family: 'Merriweather', serif;
+        }
+        
+        .cover-subtitle {
+            font-size: 20px;
+            font-weight: 300;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        
+        .cover-client {
+            font-size: 32px;
+            font-weight: 600;
+            margin: 20px 0;
+        }
+        
+        .cover-date {
+            font-size: 18px;
+            font-weight: 400;
+            margin-top: 20px;
+            opacity: 0.8;
+        }
+        
+        .cover-contact {
+            margin-top: 60px;
+            font-size: 16px;
+            line-height: 1.8;
+        }
+        
+        .cover-contact a {
+            color: white;
+            text-decoration: none;
+        }
+        
+        /* Table of contents styling */
+        .table-of-contents {
+            page-break-after: always;
+            padding: 40px 0;
+        }
+        
+        .table-of-contents h2 {
+            color: #1e3a8a;
+            font-size: 32px;
+            margin-bottom: 30px;
+            font-family: 'Merriweather', serif;
+            border-bottom: 3px solid #2563eb;
+            padding-bottom: 10px;
+        }
+        
+        .table-of-contents ol {
+            list-style-position: inside;
+            line-height: 2.5;
+            font-size: 16px;
+        }
+        
+        .table-of-contents li {
+            margin-bottom: 12px;
+        }
+        
+        .table-of-contents a {
+            color: #2563eb;
+            text-decoration: none;
+        }
+        
+        .table-of-contents a:hover {
+            text-decoration: underline;
+        }
+        
+        /* Main content area */
+        .proposal-content {
+            /* Content will have its own styling from injected CSS */
+        }
+    </style>
 </head>
 <body>
-  <!-- Empty header for border on all pages except cover -->
-  <header></header>
-  
-  <!-- Footer with contact info -->
-  <footer>
-    <hr />
-    <span>{{FOOTER_CONTACT}}</span>
-  </footer>
-  
-  <!-- Cover Page -->
-  <div class="coverPage">
-    <div class="logo">
-      <span>{{LOGO_TEXT}}</span>
+    <!-- COVER PAGE -->
+    <div class="cover-page">
+        <!-- Logo (if provided) -->
+        <div class="cover-logo-container">
+            {{#if LOGO_URL}}
+            <img src="{{LOGO_URL}}" alt="Company Logo" class="cover-logo">
+            {{else}}
+            <div class="cover-logo-placeholder">
+                <h2 style="font-size: 24px; font-weight: 600;">{{COMPANY_NAME}}</h2>
+            </div>
+            {{/if}}
+        </div>
+        
+        <!-- Title -->
+        <h1 class="cover-title">{{PROPOSAL_TITLE}}</h1>
+        
+        <!-- Prepared For -->
+        <p class="cover-subtitle">PREPARED FOR</p>
+        <h2 class="cover-client">{{PREPARED_FOR}}</h2>
+        
+        <!-- Date -->
+        <p class="cover-date">{{PROPOSAL_DATE}}</p>
+        
+        <!-- Contact Information -->
+        <div class="cover-contact">
+            <strong>{{COMPANY_NAME}}</strong><br>
+            <a href="https://{{COMPANY_WEBSITE}}">{{COMPANY_WEBSITE}}</a><br>
+            <a href="mailto:{{COMPANY_EMAIL}}">{{COMPANY_EMAIL}}</a>
+        </div>
     </div>
-    <h1>{{DOCUMENT_TITLE}}</h1>
-    <h2>Prepared for</h2>
-    <h3>{{CLIENT_NAME}}</h3>
-    <h3>{{DOCUMENT_DATE}}</h3>
-    <div class="address">
-      <b><a href="{{COMPANY_WEBSITE}}">{{COMPANY_WEBSITE}}</a></b><br />
-      <a href="mailto:{{COMPANY_EMAIL}}">{{COMPANY_EMAIL}}</a><br />
-      {{COMPANY_PHONE}}
+    
+    <!-- TABLE OF CONTENTS -->
+    {{TABLE_OF_CONTENTS}}
+    
+    <!-- MAIN PROPOSAL CONTENT -->
+    <div class="proposal-content">
+        {{PROPOSAL_CONTENT}}
     </div>
-  </div>
-  
-  <!-- PROPOSAL CONTENT INJECTION POINT -->
-  {{PROPOSAL_CONTENT}}
-  
 </body>
 </html>

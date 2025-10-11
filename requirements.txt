@@ -1,6 +1,11 @@
 fastapi==0.109.0
-uvicorn==0.27.0
+uvicorn[standard]==0.27.0
 docraptor==3.1.0
 beautifulsoup4==4.12.2
 python-multipart==0.0.6
 pydantic==2.5.3
+lxml==4.9.3
+pikepdf==8.10.1
+supabase==2.3.5
+requests==2.31.0
+python-dotenv==1.0.0

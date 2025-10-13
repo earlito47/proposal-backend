@@ -545,6 +545,68 @@ async def health():
         }
     }
 
+# ============================================================================
+# Templates Endpoints
+# ============================================================================
+
+@app.get("/api/v1/templates")
+async def get_templates():
+    """
+    Return available DocRaptor templates
+    
+    Returns a list of available proposal templates with metadata
+    """
+    templates = [
+        {
+            "id": "professional-proposal",
+            "name": "Professional Proposal",
+            "description": "Clean, modern template with blue gradient cover page and professional layout. Includes table of contents and structured sections.",
+            "page_size": "US-Letter",
+            "preview_url": None,
+            "features": [
+                "Blue gradient cover page",
+                "Automatic table of contents",
+                "Professional typography (Merriweather + Inter)",
+                "Structured section layouts",
+                "Page numbers and headers"
+            ],
+            "use_case": "General business proposals, federal bids, and government contracts",
+            "available": True
+        },
+        {
+            "id": "modern-tech",
+            "name": "Modern Tech",
+            "description": "Contemporary design optimized for technology proposals with bold headings and modern color scheme.",
+            "page_size": "US-Letter",
+            "preview_url": None,
+            "features": [
+                "Bold, modern typography",
+                "Technology-focused design",
+                "Clean code-friendly layouts",
+                "Modern color palette"
+            ],
+            "use_case": "Technology proposals, software projects, and innovation bids",
+            "available": True
+        },
+        {
+            "id": "professional-proposal-a4",
+            "name": "Professional Proposal (A4)",
+            "description": "Same professional template optimized for A4 paper size (international standard).",
+            "page_size": "A4",
+            "preview_url": None,
+            "features": [
+                "A4 page size",
+                "Blue gradient cover page",
+                "Automatic table of contents",
+                "Professional typography"
+            ],
+            "use_case": "International proposals and European contracts",
+            "available": True
+        }
+    ]
+    
+    logger.info(f"[Templates] Returning {len(templates)} available templates")
+    return templates
 
 # ============================================================================
 # Error Handlers

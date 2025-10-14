@@ -1,26 +1,22 @@
 """
 GovHub Proposal Backend - FastAPI Application
 Handles PDF/DOCX export with template styling and metadata injection
+Updated to use complete inline-CSS templates
 """
 import os
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 import docraptor
-from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
 # Import our custom modules
-from src.metadata_extractor import (
-    extract_metadata_from_html,
-    extract_toc_from_html,
-    generate_appendix_list_html
-)
+from src.metadata_extractor import extract_metadata_from_html, extract_toc_from_html
 from src.pdf_merger import PDFMerger
 
 # Configure logging
@@ -62,7 +58,7 @@ class PDFOptions(BaseModel):
     """Options for PDF generation"""
     pageSize: str = "US-Letter"
     test: bool = False
-    includeAppendices: bool = False  # Flag for PDF merging
+    includeAppendices: bool = False
 
 
 class GeneratePDFRequest(BaseModel):
@@ -70,85 +66,39 @@ class GeneratePDFRequest(BaseModel):
     html: str
     templateId: str
     options: Optional[PDFOptions] = None
-    metadata: Optional[Dict[str, Any]] = None  # Includes proposalId, client info, etc.
+    metadata: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
 # Template Management
 # ============================================================================
 
-def load_template_css(template_id: str, page_size: str = "US-Letter") -> str:
-    """Load CSS for a specific template"""
+def load_complete_template(page_size: str = "US-Letter") -> str:
+    """
+    Load complete template with inline CSS
+    
+    Args:
+        page_size: "US-Letter" or "A4"
+        
+    Returns:
+        Complete HTML template as string
+    """
     try:
         page_size_folder = page_size.lower().replace("-", "")  # "US-Letter" -> "usletter"
-        css_path = Path(f"templates/docraptor/{page_size_folder}/style.css")
+        template_path = Path(f"templates/docraptor/{page_size_folder}/complete-template.html")
         
-        if not css_path.exists():
-            logger.warning(f"[Template CSS] File not found: {css_path}")
-            return ""
+        if not template_path.exists():
+            raise FileNotFoundError(f"Template not found: {template_path}")
         
-        with open(css_path, 'r', encoding='utf-8') as f:
-            css = f.read()
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template_html = f.read()
         
-        logger.info(f"[Template CSS] ✓ Loaded {len(css)} characters from {css_path}")
-        return css
-        
-    except Exception as e:
-        logger.error(f"[Template CSS] Failed to load: {str(e)}")
-        return ""
-
-
-def inject_css_into_html(html: str, css: str) -> str:
-    """Inject CSS into HTML document"""
-    if not css:
-        logger.warning("[CSS Injection] No CSS provided, returning original HTML")
-        return html
-    
-    try:
-        # Check if HTML already has style tag
-        if '<style>' in html and '</style>' in html:
-            # Replace existing style content
-            soup = BeautifulSoup(html, 'html.parser')
-            style_tag = soup.find('style')
-            if style_tag:
-                style_tag.string = css
-                result = str(soup)
-            else:
-                result = html.replace('</head>', f'<style>{css}</style></head>')
-        else:
-            # Inject new style tag
-            if '</head>' in html:
-                result = html.replace('</head>', f'<style>{css}</style></head>')
-            else:
-                result = f'<style>{css}</style>{html}'
-        
-        logger.info(f"[CSS Injection] ✓ Injected {len(css)} characters")
-        return result
+        logger.info(f"[Template] ✓ Loaded complete template from {template_path} ({len(template_html)} chars)")
+        return template_html
         
     except Exception as e:
-        logger.error(f"[CSS Injection] Failed: {str(e)}")
-        return html
-
-
-def load_wrapper_template(page_size: str = "US-Letter") -> str:
-    """Load DocRaptor wrapper template"""
-    try:
-        page_size_folder = page_size.lower().replace("-", "")
-        wrapper_path = Path(f"templates/docraptor/{page_size_folder}/wrapper.html")
-        
-        if not wrapper_path.exists():
-            logger.warning(f"[Wrapper] File not found: {wrapper_path}")
-            return ""
-        
-        with open(wrapper_path, 'r', encoding='utf-8') as f:
-            wrapper = f.read()
-        
-        logger.info(f"[Wrapper] ✓ Loaded from {wrapper_path}")
-        return wrapper
-        
-    except Exception as e:
-        logger.error(f"[Wrapper] Failed to load: {str(e)}")
-        return ""
+        logger.error(f"[Template] Failed to load: {str(e)}")
+        raise
 
 
 # ============================================================================
@@ -175,32 +125,22 @@ def get_docraptor_client():
 @app.post("/api/v1/generate-pdf")
 async def generate_pdf(request: GeneratePDFRequest):
     """
-    Generate PDF from HTML with template styling and metadata
+    Generate PDF using complete inline-CSS template
     
+    - Loads complete template (CSS + HTML together)
     - Extracts metadata from HTML and request
     - Generates table of contents
-    - Injects CSS styling
-    - Populates wrapper template with metadata
+    - Replaces all placeholders
     - Generates PDF using DocRaptor
     """
     try:
         logger.info(f"[PDF Generation] Starting - Template: {request.templateId}")
         
         # ====================================================================
-        # STEP 1: Load Template Assets
+        # STEP 1: Load Complete Template (CSS + HTML together)
         # ====================================================================
         page_size = request.options.pageSize if request.options else "US-Letter"
-        
-        # Load CSS
-        css = load_template_css(request.templateId, page_size)
-        if not css:
-            logger.warning("[PDF Generation] No CSS loaded, proceeding without styling")
-        
-        # Load wrapper
-        wrapper_html = load_wrapper_template(page_size)
-        if not wrapper_html:
-            logger.warning("[PDF Generation] No wrapper loaded, using direct HTML")
-            wrapper_html = "{{PROPOSAL_CONTENT}}"  # Minimal wrapper
+        template_html = load_complete_template(page_size)
         
         # ====================================================================
         # STEP 2: Extract Metadata
@@ -214,48 +154,83 @@ async def generate_pdf(request: GeneratePDFRequest):
             }
         
         metadata = extract_metadata_from_html(request.html, proposal_data)
-        logger.info(f"[Metadata] Extracted: {metadata}")
+        logger.info(f"[Metadata] Extracted: title='{metadata['title']}', client='{metadata['prepared_for']}'")
         
         # ====================================================================
-        # STEP 3: Extract/Generate Table of Contents
-        # ====================================================================
-        toc_html = extract_toc_from_html(request.html)
-        logger.info(f"[TOC] Generated {len(toc_html)} characters")
-        
-        # ====================================================================
-        # STEP 4: Get Company Info (from env vars or request)
+        # STEP 3: Get Company Info
         # ====================================================================
         company_name = os.getenv('COMPANY_NAME', '')
         company_website = os.getenv('COMPANY_WEBSITE', '')
         company_email = os.getenv('COMPANY_EMAIL', '')
+        company_phone = os.getenv('COMPANY_PHONE', '')
         company_logo_url = os.getenv('COMPANY_LOGO_URL', '')
         
         # Override with request metadata if provided
         if request.metadata:
-            company_name = request.metadata.get('companyName', company_name)
-            company_website = request.metadata.get('companyWebsite', company_website)
-            company_email = request.metadata.get('companyEmail', company_email)
-            company_logo_url = request.metadata.get('logoUrl', company_logo_url)
+            company_name = request.metadata.get('companyName', company_name) or company_name
+            company_website = request.metadata.get('companyWebsite', company_website) or company_website
+            company_email = request.metadata.get('companyEmail', company_email) or company_email
+            company_logo_url = request.metadata.get('logoUrl', company_logo_url) or company_logo_url
+        
+        # Ensure we have at least default values
+        company_name = company_name or 'Your Company'
+        company_website = company_website or 'yourcompany.com'
+        company_email = company_email or 'contact@yourcompany.com'
+        company_phone = company_phone or '555-123-4567'
+        
+        logger.info(f"[Company] Using: {company_name} | {company_email} | {company_phone}")
         
         # ====================================================================
-        # STEP 5: Inject CSS into Proposal Content
+        # STEP 4: Handle Logo Placeholder
         # ====================================================================
-        styled_html = inject_css_into_html(request.html, css)
+        if company_logo_url:
+            # Use logo image
+            logo_html = f'''<div class="logo" style="position:relative; width:4cm; height:4cm; border-radius:100%; background-color:white; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+    <img src="{company_logo_url}" alt="{company_name}" style="max-width:90%; max-height:90%; object-fit:contain;">
+</div>'''
+            logger.info(f"[Logo] Using logo image: {company_logo_url}")
+        else:
+            # Use company name in circle
+            logo_html = f'''<div class="logo">
+    <span>{company_name}</span>
+</div>'''
+            logger.info(f"[Logo] Using text logo: {company_name}")
         
         # ====================================================================
-        # STEP 6: Populate Wrapper Template
+        # STEP 5: Generate TOC (Optional)
         # ====================================================================
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
-        wrapper_html = wrapper_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
-        wrapper_html = wrapper_html.replace('{{COMPANY_NAME}}', company_name)
-        wrapper_html = wrapper_html.replace('{{COMPANY_WEBSITE}}', company_website)
-        wrapper_html = wrapper_html.replace('{{COMPANY_EMAIL}}', company_email)
-        wrapper_html = wrapper_html.replace('{{LOGO_URL}}', company_logo_url)
-        wrapper_html = wrapper_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_CONTENT}}', styled_html)
+        toc_html = extract_toc_from_html(request.html)
         
-        logger.info("[Wrapper] ✓ All placeholders replaced")
+        # Wrap TOC in a chapter container if it exists
+        if toc_html and toc_html.strip():
+            toc_html = f'<div class="chapter">{toc_html}</div>'
+            logger.info(f"[TOC] Generated ({len(toc_html)} chars)")
+        else:
+            toc_html = ''
+            logger.info("[TOC] Skipped (no sections found)")
+        
+        # ====================================================================
+        # STEP 6: Replace All Placeholders
+        # ====================================================================
+        final_html = template_html
+        
+        # Cover page placeholders
+        final_html = final_html.replace('{{LOGO_PLACEHOLDER}}', logo_html)
+        final_html = final_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
+        final_html = final_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
+        final_html = final_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
+        
+        # Company info placeholders
+        final_html = final_html.replace('{{COMPANY_NAME}}', company_name)
+        final_html = final_html.replace('{{COMPANY_WEBSITE}}', company_website)
+        final_html = final_html.replace('{{COMPANY_EMAIL}}', company_email)
+        final_html = final_html.replace('{{COMPANY_PHONE}}', company_phone)
+        
+        # Content placeholders
+        final_html = final_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
+        final_html = final_html.replace('{{PROPOSAL_CONTENT}}', request.html)
+        
+        logger.info("[Template] ✓ All placeholders replaced")
         
         # ====================================================================
         # STEP 7: Generate PDF with DocRaptor
@@ -266,7 +241,7 @@ async def generate_pdf(request: GeneratePDFRequest):
         logger.info(f"[DocRaptor] Calling API (test mode: {test_mode})")
         
         pdf_response = doc_api.create_doc({
-            "document_content": wrapper_html,
+            "document_content": final_html,
             "name": f"{metadata['title']}.pdf",
             "document_type": "pdf",
             "test": test_mode,
@@ -295,7 +270,7 @@ async def generate_pdf(request: GeneratePDFRequest):
         raise HTTPException(status_code=502, detail=f"DocRaptor error: {error_detail}")
         
     except Exception as e:
-        logger.error(f"[PDF Generation] ✗ Failed: {str(e)}")
+        logger.error(f"[PDF Generation] ✗ Failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
@@ -329,16 +304,12 @@ async def generate_pdf_with_appendices(request: GeneratePDFRequest):
             include_appendices = request.options.includeAppendices
         
         # ====================================================================
-        # STEP 1: Generate Main Proposal PDF (same as generate_pdf)
+        # STEP 1: Generate Main Proposal PDF
         # ====================================================================
-        # We'll reuse the same logic, but extract it to a helper function
-        # For now, call the generate_pdf endpoint internally
-        
-        # Generate main PDF using the same logic
         page_size = request.options.pageSize if request.options else "US-Letter"
-        css = load_template_css(request.templateId, page_size)
-        wrapper_html = load_wrapper_template(page_size)
+        template_html = load_complete_template(page_size)
         
+        # Extract metadata
         proposal_data = {}
         if request.metadata:
             proposal_data = {
@@ -348,33 +319,46 @@ async def generate_pdf_with_appendices(request: GeneratePDFRequest):
             }
         
         metadata = extract_metadata_from_html(request.html, proposal_data)
-        toc_html = extract_toc_from_html(request.html)
         
         # Get company info
-        company_name = os.getenv('COMPANY_NAME', request.metadata.get('companyName', '') if request.metadata else '')
-        company_website = os.getenv('COMPANY_WEBSITE', request.metadata.get('companyWebsite', '') if request.metadata else '')
-        company_email = os.getenv('COMPANY_EMAIL', request.metadata.get('companyEmail', '') if request.metadata else '')
+        company_name = os.getenv('COMPANY_NAME', request.metadata.get('companyName', 'Your Company') if request.metadata else 'Your Company')
+        company_website = os.getenv('COMPANY_WEBSITE', request.metadata.get('companyWebsite', 'yourcompany.com') if request.metadata else 'yourcompany.com')
+        company_email = os.getenv('COMPANY_EMAIL', request.metadata.get('companyEmail', 'contact@yourcompany.com') if request.metadata else 'contact@yourcompany.com')
+        company_phone = os.getenv('COMPANY_PHONE', '555-123-4567')
         company_logo_url = os.getenv('COMPANY_LOGO_URL', request.metadata.get('logoUrl', '') if request.metadata else '')
         
-        styled_html = inject_css_into_html(request.html, css)
+        # Handle logo
+        if company_logo_url:
+            logo_html = f'<div class="logo" style="position:relative; width:4cm; height:4cm; border-radius:100%; background-color:white; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="{company_logo_url}" alt="{company_name}" style="max-width:90%; max-height:90%; object-fit:contain;"></div>'
+        else:
+            logo_html = f'<div class="logo"><span>{company_name}</span></div>'
         
-        # Populate wrapper
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
-        wrapper_html = wrapper_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
-        wrapper_html = wrapper_html.replace('{{COMPANY_NAME}}', company_name)
-        wrapper_html = wrapper_html.replace('{{COMPANY_WEBSITE}}', company_website)
-        wrapper_html = wrapper_html.replace('{{COMPANY_EMAIL}}', company_email)
-        wrapper_html = wrapper_html.replace('{{LOGO_URL}}', company_logo_url)
-        wrapper_html = wrapper_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
-        wrapper_html = wrapper_html.replace('{{PROPOSAL_CONTENT}}', styled_html)
+        # Generate TOC
+        toc_html = extract_toc_from_html(request.html)
+        if toc_html and toc_html.strip():
+            toc_html = f'<div class="chapter">{toc_html}</div>'
+        else:
+            toc_html = ''
+        
+        # Replace placeholders
+        final_html = template_html
+        final_html = final_html.replace('{{LOGO_PLACEHOLDER}}', logo_html)
+        final_html = final_html.replace('{{PROPOSAL_TITLE}}', metadata['title'])
+        final_html = final_html.replace('{{PREPARED_FOR}}', metadata['prepared_for'])
+        final_html = final_html.replace('{{PROPOSAL_DATE}}', metadata['date'])
+        final_html = final_html.replace('{{COMPANY_NAME}}', company_name)
+        final_html = final_html.replace('{{COMPANY_WEBSITE}}', company_website)
+        final_html = final_html.replace('{{COMPANY_EMAIL}}', company_email)
+        final_html = final_html.replace('{{COMPANY_PHONE}}', company_phone)
+        final_html = final_html.replace('{{TABLE_OF_CONTENTS}}', toc_html)
+        final_html = final_html.replace('{{PROPOSAL_CONTENT}}', request.html)
         
         # Generate main PDF
         doc_api = get_docraptor_client()
         test_mode = request.options.test if request.options else False
         
         main_pdf_bytes = doc_api.create_doc({
-            "document_content": wrapper_html,
+            "document_content": final_html,
             "name": f"{metadata['title']}.pdf",
             "document_type": "pdf",
             "test": test_mode,
@@ -398,7 +382,7 @@ async def generate_pdf_with_appendices(request: GeneratePDFRequest):
             )
         
         # ====================================================================
-        # STEP 2: Fetch Attachments from Supabase
+        # STEP 2: Fetch Attachments from Supabase (FIXED QUERY)
         # ====================================================================
         proposal_id = request.metadata.get('proposalId') if request.metadata else None
         if not proposal_id:
@@ -413,35 +397,78 @@ async def generate_pdf_with_appendices(request: GeneratePDFRequest):
         
         logger.info(f"[Attachments] Fetching for proposal: {proposal_id}")
         
-        # Query section_attachments table
-        result = supabase.table('section_attachments') \
-            .select('library_item_id, library_documents(storage_path, title, mime_type, original_filename)') \
+        # FIXED: Get section IDs first, then query section_attachments
+        sections_result = supabase.table('proposal_sections') \
+            .select('id') \
             .eq('proposal_id', proposal_id) \
             .execute()
         
-        # Filter for PDF attachments only
+        section_ids = [s['id'] for s in sections_result.data] if sections_result.data else []
+        logger.info(f"[Attachments] Found {len(section_ids)} sections")
+        
+        # Get section attachments
+        section_attachments = []
+        if section_ids:
+            result = supabase.table('section_attachments') \
+                .select('library_item_id, library_documents!inner(storage_path, title, file_type, original_filename)') \
+                .in_('proposal_section_id', section_ids) \
+                .eq('mode', 'attach_only') \
+                .execute()
+            
+            section_attachments = result.data or []
+            logger.info(f"[Attachments] Found {len(section_attachments)} section attachments")
+        
+        # Get global attachments
+        global_result = supabase.table('proposal_global_attachments') \
+            .select('library_item_id, library_documents!inner(storage_path, title, file_type, original_filename)') \
+            .eq('proposal_id', proposal_id) \
+            .eq('mode', 'attach_only') \
+            .execute()
+        
+        global_attachments = global_result.data or []
+        logger.info(f"[Attachments] Found {len(global_attachments)} global attachments")
+        
+        # Combine and filter for PDFs only
+        all_attachments = section_attachments + global_attachments
         pdf_attachments = []
-        for item in result.data:
+        
+        for item in all_attachments:
             if not item.get('library_documents'):
                 continue
             
             doc = item['library_documents']
-            mime_type = doc.get('mime_type', '')
+            file_type = doc.get('file_type', '')
             
-            if mime_type == 'application/pdf':
+            if file_type == 'application/pdf':
                 storage_path = doc.get('storage_path')
-                title = doc.get('title') or doc.get('original_filename', 'Attachment')
+                if not storage_path:
+                    logger.warning(f"[Attachments] No storage_path for document")
+                    continue
                 
-                # Get public URL
-                public_url = supabase.storage.from_('rfp-uploads').get_public_url(storage_path)
-                
-                pdf_attachments.append({
-                    'title': title,
-                    'url': public_url,
-                    'file_type': 'PDF'
-                })
+                # Get signed URL (more reliable than public URL)
+                try:
+                    clean_path = storage_path.lstrip('/')
+                    signed_url = supabase.storage.from_('rfp-uploads').create_signed_url(
+                        clean_path, 
+                        expires_in=3600  # 1 hour
+                    )
+                    
+                    title = doc.get('title') or doc.get('original_filename', 'Attachment')
+                    pdf_url = signed_url['signedURL']
+                    
+                    pdf_attachments.append({
+                        'title': title,
+                        'url': pdf_url,
+                        'file_type': 'PDF'
+                    })
+                    
+                    logger.info(f"[Attachments] ✓ Queued: {title}")
+                    
+                except Exception as e:
+                    logger.error(f"[Attachments] Failed to get URL for {storage_path}: {e}")
+                    continue
         
-        logger.info(f"[Attachments] Found {len(pdf_attachments)} PDF attachments")
+        logger.info(f"[Attachments] Total PDF attachments to merge: {len(pdf_attachments)}")
         
         if not pdf_attachments:
             logger.info("[PDF + Appendices] No PDF attachments - returning main PDF only")
@@ -485,7 +512,7 @@ async def generate_pdf_with_appendices(request: GeneratePDFRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[PDF + Appendices] ✗ Failed: {str(e)}")
+        logger.error(f"[PDF + Appendices] ✗ Failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"PDF generation with appendices failed: {str(e)}"
@@ -506,7 +533,7 @@ async def root():
         "features": {
             "pdf_generation": True,
             "pdf_merging": supabase is not None,
-            "templates": True,
+            "templates": "complete_inline_css",
             "metadata_extraction": True
         }
     }
@@ -524,10 +551,8 @@ async def health():
     
     # Check template files
     template_check = {
-        "usletter_wrapper": Path("templates/docraptor/usletter/wrapper.html").exists(),
-        "usletter_css": Path("templates/docraptor/usletter/style.css").exists(),
-        "a4_wrapper": Path("templates/docraptor/a4/wrapper.html").exists(),
-        "a4_css": Path("templates/docraptor/a4/style.css").exists(),
+        "usletter_template": Path("templates/docraptor/usletter/complete-template.html").exists(),
+        "a4_template": Path("templates/docraptor/a4/complete-template.html").exists(),
     }
     
     return {
@@ -542,8 +567,58 @@ async def health():
             "company_name": bool(os.getenv('COMPANY_NAME')),
             "company_website": bool(os.getenv('COMPANY_WEBSITE')),
             "company_email": bool(os.getenv('COMPANY_EMAIL')),
+            "company_phone": bool(os.getenv('COMPANY_PHONE')),
+            "company_logo_url": bool(os.getenv('COMPANY_LOGO_URL')),
         }
     }
+
+
+# ============================================================================
+# Test Template Endpoint (Development Only)
+# ============================================================================
+
+@app.get("/test-template")
+async def test_template():
+    """Test template with dummy data - useful for debugging"""
+    try:
+        template_html = load_complete_template("US-Letter")
+        
+        # Replace with test data
+        test_html = template_html.replace('{{PROPOSAL_TITLE}}', 'Test Proposal')
+        test_html = test_html.replace('{{PREPARED_FOR}}', 'Acme Corporation')
+        test_html = test_html.replace('{{PROPOSAL_DATE}}', '10.14.25')
+        test_html = test_html.replace('{{COMPANY_NAME}}', 'Test Company')
+        test_html = test_html.replace('{{COMPANY_WEBSITE}}', 'testcompany.com')
+        test_html = test_html.replace('{{COMPANY_EMAIL}}', 'info@testcompany.com')
+        test_html = test_html.replace('{{COMPANY_PHONE}}', '555-1234')
+        test_html = test_html.replace('{{LOGO_PLACEHOLDER}}', '<div class="logo"><span>Test Company</span></div>')
+        test_html = test_html.replace('{{TABLE_OF_CONTENTS}}', '')
+        test_html = test_html.replace('{{PROPOSAL_CONTENT}}', '<div class="chapter"><h1>Test Section</h1><p>This is a test of the template system.</p></div>')
+        
+        # Generate PDF
+        doc_api = get_docraptor_client()
+        
+        pdf_response = doc_api.create_doc({
+            "document_content": test_html,
+            "name": "test.pdf",
+            "document_type": "pdf",
+            "test": False,  # Production mode to avoid watermark
+            "prince_options": {
+                "media": "print",
+                "profile": "PDF/A-1b",
+            }
+        })
+        
+        return Response(
+            content=pdf_response,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="test.pdf"'}
+        )
+        
+    except Exception as e:
+        logger.error(f"[Test] Failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
 # Templates Endpoints
@@ -553,8 +628,6 @@ async def health():
 async def get_templates():
     """
     Return available DocRaptor templates
-    
-    Returns a list of available proposal templates with metadata
     """
     templates = [
         {
@@ -566,26 +639,11 @@ async def get_templates():
             "features": [
                 "Blue gradient cover page",
                 "Automatic table of contents",
-                "Professional typography (Merriweather + Inter)",
+                "Professional typography (Montserrat)",
                 "Structured section layouts",
                 "Page numbers and headers"
             ],
             "use_case": "General business proposals, federal bids, and government contracts",
-            "available": True
-        },
-        {
-            "id": "modern-tech",
-            "name": "Modern Tech",
-            "description": "Contemporary design optimized for technology proposals with bold headings and modern color scheme.",
-            "page_size": "US-Letter",
-            "preview_url": None,
-            "features": [
-                "Bold, modern typography",
-                "Technology-focused design",
-                "Clean code-friendly layouts",
-                "Modern color palette"
-            ],
-            "use_case": "Technology proposals, software projects, and innovation bids",
             "available": True
         },
         {
@@ -607,6 +665,7 @@ async def get_templates():
     
     logger.info(f"[Templates] Returning {len(templates)} available templates")
     return templates
+
 
 # ============================================================================
 # Error Handlers
